@@ -66,7 +66,7 @@ ________________
 	2
 	02.06.2026
 	0.2
-	Написання розділів «Опис виконаної роботи», «Висновки», «Додаток А», «Додаток Б».
+	Написання розділів «Опис виконаної роботи», «Висновки», «Додаток А», «Додаток Б», «Додаток В».
 	________________
 
 
@@ -137,7 +137,7 @@ Slack використовує комбінований архітектурни
 Slack використовує два основні протоколи для комунікації між клієнтом і сервером. Для доставки повідомлень у реальному часі використовується кастомний протокол на основі JSON-об'єктів, що передаються через WebSocket-канал (Real Time Messaging API). Для решти операцій — REST API поверх HTTPS. Quora
 Клієнт надсилає HTTP-запит до веб-API сервісу чату для публікації повідомлення. Сервіс чату зберігає повідомлення у базі даних та делегує його Dispatcher-сервісу. Dispatcher виконує запит до локального сховища точок доступу для визначення дата-центрів підписаних клієнтів. Dispatcher розсилає повідомлення лише до відповідних дата-центрів через HTTP. Dispatcher у дата-центрі-адресаті визначає список шлюзових серверів, які обслуговують підписаних клієнтів. Шлюзовий сервер визначає список підписаних клієнтів та розсилає повідомлення через WebSocket. System Design
 Некритичні завдання — наприклад, індексування повідомлень для пошуку або відправка email-сповіщень — передаються до черги завдань на базі Apache Kafka або Redis Streams. Воркери асинхронно опрацьовують ці завдання, не блокуючи основний потік доставки повідомлень.
-Видима симптома роботи на великому масштабі — дублювання повідомлень, спричинене повторними спробами клієнта через мережеві затримки. Slack використовує ідемпотентні ключі для ідентифікації та придушення дублікатів. Клієнти синхронізують стан через порядкові номери подій та отримують лише ті зміни, яких бракує після переривання з'єднання.
+Видима симптома роботи на великому масштабі — дублювання повідомлень, спричинене повторними спробами клієнта через мережеві затримки. Slack використовує ідемпотентні ключі для ідентифікації та придушення дублікатів. Клієнти синхронізують стан через порядкові номери подій та отримують лише ті зміни, яких бракує після переривання з'єднання. Приклад взаємодії компонентів у спрощеному вигляді наведено в додатку В
 
 
   
@@ -273,3 +273,212 @@ ________________
   
  
 Рисунок Б.13 – Слайд 13
+________________
+
+
+ДОДАТОК В
+Приклади програмного коду
+
+
+  1  using System;
+  2  using System.Collections.Generic;
+  3  using System.Threading;
+  4  using System.Threading.Tasks;
+  5  
+  6  public class Message
+  7  {
+  8      public string Id          { get; set; }
+  9      public string ChannelId   { get; set; }
+ 10      public string SenderId    { get; set; }
+ 11      public string Text        { get; set; }
+ 12      public DateTime Timestamp { get; set; }
+ 13  }
+ 14  
+ 15  public class RedisCache
+ 16  {
+ 17      private readonly Dictionary<string, List<string>> _subscriptions = new();
+ 18      private readonly Dictionary<string, string>       _cache         = new();
+ 19  
+ 20      public void Subscribe(string channelId, string clientId)
+ 21      {
+ 22          if (!_subscriptions.ContainsKey(channelId))
+ 23              _subscriptions[channelId] = new List<string>();
+ 24          _subscriptions[channelId].Add(clientId);
+ 25      }
+ 26  
+ 27      public List<string> GetSubscribers(string channelId)
+ 28      {
+ 29          return _subscriptions.TryGetValue(channelId, out var list) ? list : new List<string>();
+ 30      }
+ 31  
+ 32      public void Set(string key, string value) => _cache[key] = value;
+ 33      public string Get(string key) => _cache.TryGetValue(key, out var v) ? v : null;
+ 34  }
+ 35  
+ 36  public class KafkaQueue
+ 37  {
+ 38      private readonly Queue<(string Topic, Message Msg)> _queue = new();
+ 39  
+ 40      public void Publish(string topic, Message message)
+ 41      {
+ 42          _queue.Enqueue((topic, message));
+ 43          Console.WriteLine($"[Kafka]   Подія опублікована у топік '{topic}'");
+ 44      }
+ 45  
+ 46      public (string Topic, Message Msg)? Poll()
+ 47      {
+ 48          return _queue.Count > 0 ? _queue.Dequeue() : null;
+ 49      }
+ 50  }
+ 51  
+ 52  public class Database
+ 53  {
+ 54      private readonly List<Message> _messages = new();
+ 55  
+ 56      public void Save(Message message)
+ 57      {
+ 58          _messages.Add(message);
+ 59          Console.WriteLine($"[MySQL]   Повідомлення збережено (id={message.Id}, shard за channelId={message.ChannelId})");
+ 60      }
+ 61  }
+ 62  
+ 63  public class GatewayServer
+ 64  {
+ 65      public void DeliverWebSocket(string clientId, Message message)
+ 66      {
+ 67          Console.WriteLine($"[Gateway] WebSocket → клієнт '{clientId}': \"{message.Text}\"");
+ 68      }
+ 69  }
+ 70  
+ 71  public class Dispatcher
+ 72  {
+ 73      private readonly RedisCache    _cache;
+ 74      private readonly GatewayServer _gateway;
+ 75  
+ 76      public Dispatcher(RedisCache cache, GatewayServer gateway)
+ 77      {
+ 78          _cache   = cache;
+ 79          _gateway = gateway;
+ 80      }
+ 81  
+ 82      public void Route(Message message)
+ 83      {
+ 84          var subscribers = _cache.GetSubscribers(message.ChannelId);
+ 85          Console.WriteLine($"[Dispatcher] Знайдено підписників: {subscribers.Count}");
+ 86          foreach (var clientId in subscribers)
+ 87              _gateway.DeliverWebSocket(clientId, message);
+ 88      }
+ 89  }
+ 90  
+ 91  public class SearchService
+ 92  {
+ 93      public void Index(Message message)
+ 94      {
+ 95          Console.WriteLine($"[Solr]    Індексування повідомлення id={message.Id}: \"{message.Text}\"");
+ 96      }
+ 97  }
+ 98  
+ 99  public class NotificationService
+100  {
+101      private readonly RedisCache _cache;
+102  
+103      public NotificationService(RedisCache cache) => _cache = cache;
+104  
+105      public void Notify(Message message)
+106      {
+107          var status = _cache.Get($"presence:{message.ChannelId}:offline-user");
+108          if (status != null)
+109              Console.WriteLine($"[Notify]  Push-сповіщення → offline-user: нове повідомлення у каналі '{message.ChannelId}'");
+110          else
+111              Console.WriteLine($"[Notify]  Усі підписники онлайн, push не потрібен");
+112      }
+113  }
+114  
+115  public class ChatService
+116  {
+117      private readonly Database    _db;
+118      private readonly Dispatcher  _dispatcher;
+119      private readonly KafkaQueue  _kafka;
+120  
+121      public ChatService(Database db, Dispatcher dispatcher, KafkaQueue kafka)
+122      {
+123          _db         = db;
+124          _dispatcher = dispatcher;
+125          _kafka      = kafka;
+126      }
+127  
+128      public void Send(Message message)
+129      {
+130          Console.WriteLine($"\n[ChatService] Отримано повідомлення від '{message.SenderId}' у канал '{message.ChannelId}'");
+131          _db.Save(message);
+132          _dispatcher.Route(message);
+133          _kafka.Publish("messages.new",    message);
+134          _kafka.Publish("messages.search", message);
+135      }
+136  }
+137  
+138  public class ApiGateway
+139  {
+140      private readonly ChatService _chatService;
+141  
+142      public ApiGateway(ChatService chatService) => _chatService = chatService;
+143  
+144      public void HandleRequest(Message message)
+145      {
+146          Console.WriteLine($"[API Gateway] POST /api/chat.postMessage → ChatService");
+147          _chatService.Send(message);
+148      }
+149  }
+150  
+151  class Program
+152  {
+153      static async Task Main()
+154      {
+155          Console.WriteLine("=== Симуляція потоку даних Slack ===\n");
+156  
+157          var redis      = new RedisCache();
+158          var kafka      = new KafkaQueue();
+159          var db         = new Database();
+160          var gateway    = new GatewayServer();
+161          var dispatcher = new Dispatcher(redis, gateway);
+162          var search     = new SearchService();
+163          var notify     = new NotificationService(redis);
+164          var chat       = new ChatService(db, dispatcher, kafka);
+165          var apiGateway = new ApiGateway(chat);
+166  
+167          redis.Subscribe("general", "user-alice");
+168          redis.Subscribe("general", "user-bob");
+169          redis.Subscribe("general", "user-carol");
+170          redis.Set("presence:general:offline-user", "offline");
+171  
+172          Console.WriteLine("[Redis] Підписки зареєстровано: user-alice, user-bob, user-carol");
+173          Console.WriteLine("[Redis] user-carol позначена як офлайн\n");
+174  
+175          var message = new Message
+176          {
+177              Id        = Guid.NewGuid().ToString()[..8],
+178              ChannelId = "general",
+179              SenderId  = "user-alice",
+180              Text      = "Привіт команда! Є оновлення по проєкту.",
+181              Timestamp = DateTime.UtcNow
+182          };
+183  
+184          Console.WriteLine("--- Крок 1: Клієнт надсилає HTTP-запит ---");
+185          apiGateway.HandleRequest(message);
+186  
+187          Console.WriteLine("\n--- Крок 6: Асинхронна обробка через Kafka ---");
+188          await Task.Delay(100);
+189  
+190          while (true)
+191          {
+192              var item = kafka.Poll();
+193              if (item == null) break;
+194              if (item.Value.Topic == "messages.search")
+195                  search.Index(item.Value.Msg);
+196              else if (item.Value.Topic == "messages.new")
+197                  notify.Notify(item.Value.Msg);
+198          }
+199  
+200          Console.WriteLine("\n=== Повідомлення успішно доставлено ===");
+201      }
+202  }
